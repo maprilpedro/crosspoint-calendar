@@ -256,23 +256,23 @@ async function fetchTramDepartures(windowStart: number[], now: Date): Promise<Tr
   const data = await resp.json() as {
     stationboard: Array<{
       name: string;
+      number: string;
+      category: string;
       to: string;
-      stop: { departure: string; prognosis: { departure: string | null } };
+      stop: { departure: string; delay: number | null };
     }>;
   };
 
   return (data.stationboard || [])
     .filter(entry => {
       // Line 8 only, going toward SBB (away from Neuweilerstrasse)
-      const name = (entry.name || '').replace(/\s/g, '');
-      const isLine8 = name === '8' || name === 'T8' || name === 'Tram8';
+      const isLine8 = entry.number === '8';
       const towardSBB = !entry.to?.toLowerCase().includes('neuweiler');
       return isLine8 && towardSBB;
     })
     .map(entry => {
       const scheduled = new Date(entry.stop.departure);
-      const prognosis = entry.stop.prognosis?.departure ? new Date(entry.stop.prognosis.departure) : null;
-      const delay = prognosis ? Math.round((prognosis.getTime() - scheduled.getTime()) / 60000) : 0;
+      const delay = entry.stop.delay ?? 0;
       const timeStr = scheduled.toLocaleTimeString('de-CH', {
         hour: '2-digit', minute: '2-digit', hour12: false, timeZone: TIMEZONE,
       });
