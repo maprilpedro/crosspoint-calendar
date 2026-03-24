@@ -39,10 +39,10 @@ interface DayEvents {
   events: CalendarEvent[];
 }
 
-// Brooklyn, NY coordinates (zip 11222)
-const BROOKLYN_LAT = 40.7243;
-const BROOKLYN_LON = -73.9493;
-const TIMEZONE = 'America/New_York';
+// Basel, Switzerland coordinates
+const LAT = 47.5596;
+const LON = 7.5886;
+const TIMEZONE = 'Europe/Zurich';
 
 // WMO Weather codes to text
 const WMO_CODES: { [key: number]: string } = {
@@ -101,7 +101,7 @@ const VC_TO_WMO: { [key: string]: number } = {
 };
 
 async function fetchWeatherFromOpenMeteo(): Promise<WeatherData> {
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${BROOKLYN_LAT}&longitude=${BROOKLYN_LON}&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min&temperature_unit=fahrenheit&timezone=${encodeURIComponent(TIMEZONE)}&forecast_days=1`;
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min&temperature_unit=celsius&timezone=${encodeURIComponent(TIMEZONE)}&forecast_days=1`;
 
   const response = await fetch(url, {
     headers: {
@@ -128,8 +128,8 @@ async function fetchWeatherFromOpenMeteo(): Promise<WeatherData> {
 }
 
 async function fetchWeatherFromVisualCrossing(apiKey: string): Promise<WeatherData> {
-  const location = `${BROOKLYN_LAT},${BROOKLYN_LON}`;
-  const url = `https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/${location}/today?unitGroup=us&include=current,days&key=${apiKey}&contentType=json`;
+  const location = `${LAT},${LON}`;
+  const url = `https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/${location}/today?unitGroup=metric&include=current,days&key=${apiKey}&contentType=json`;
 
   const response = await fetch(url);
   if (!response.ok) {
@@ -212,6 +212,72 @@ async function fetchWeather(env: Env): Promise<WeatherData> {
   console.log('Cached error state for backoff');
 
   return errorData;
+}
+
+// ============================================================================
+// Transit
+// ============================================================================
+
+interface TramDeparture {
+  time: string;    // "08:05"
+  delay: number;   // minutes, 0 = on time
+  isPast: boolean;
+}
+
+// Transit time windows (Basel local time, 24h)
+const MORNING_WINDOW  = { start: [8, 0],  end: [10, 30] };
+const AFTERNOON_WINDOW = { start: [14, 0], end: [19, 0]  };
+
+function getBaselHourMin(now: Date): [number, number] {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: TIMEZONE, hour: 'numeric', minute: 'numeric', hour12: false,
+  }).formatToParts(now);
+  const h = parseInt(parts.find(p => p.type === 'hour')!.value);
+  const m = parseInt(parts.find(p => p.type === 'minute')!.value);
+  return [h, m];
+}
+
+function inWindow(h: number, m: number, win: { start: number[]; end: number[] }): boolean {
+  const cur = h * 60 + m;
+  return cur >= win.start[0] * 60 + win.start[1] && cur <= win.end[0] * 60 + win.end[1];
+}
+
+async function fetchTramDepartures(windowStart: number[], now: Date): Promise<TramDeparture[]> {
+  const todayInBasel = now.toLocaleDateString('en-CA', { timeZone: TIMEZONE });
+  const startStr = `${todayInBasel}T${String(windowStart[0]).padStart(2, '0')}:${String(windowStart[1]).padStart(2, '0')}:00`;
+
+  const url = `https://transport.opendata.ch/v1/stationboard?station=Basel%2C%20Laupenring&datetime=${encodeURIComponent(startStr)}&limit=60&transportations[]=tram`;
+
+  const resp = await fetch(url, {
+    headers: { 'User-Agent': 'CrossPointCalendar/1.0 (e-ink display)' },
+  });
+  if (!resp.ok) throw new Error(`Transit API ${resp.status}`);
+
+  const data = await resp.json() as {
+    stationboard: Array<{
+      name: string;
+      to: string;
+      stop: { departure: string; prognosis: { departure: string | null } };
+    }>;
+  };
+
+  return (data.stationboard || [])
+    .filter(entry => {
+      // Line 8 only, going toward SBB (away from Neuweilerstrasse)
+      const name = (entry.name || '').replace(/\s/g, '');
+      const isLine8 = name === '8' || name === 'T8' || name === 'Tram8';
+      const towardSBB = !entry.to?.toLowerCase().includes('neuweiler');
+      return isLine8 && towardSBB;
+    })
+    .map(entry => {
+      const scheduled = new Date(entry.stop.departure);
+      const prognosis = entry.stop.prognosis?.departure ? new Date(entry.stop.prognosis.departure) : null;
+      const delay = prognosis ? Math.round((prognosis.getTime() - scheduled.getTime()) / 60000) : 0;
+      const timeStr = scheduled.toLocaleTimeString('de-CH', {
+        hour: '2-digit', minute: '2-digit', hour12: false, timeZone: TIMEZONE,
+      });
+      return { time: timeStr, delay, isPast: scheduled < now };
+    });
 }
 
 const DAY_NAMES = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'];
@@ -716,7 +782,7 @@ function renderDisplay(
   drawWeatherIcon(pixels, width, textStartX - iconSize - 8, 20, weather.conditionCode);
 
   // Location (right-aligned)
-  drawRightAlignedText(pixels, width, 28, 'BROOKLYN NY', INK_BLACK, 2, MARGIN);
+  drawRightAlignedText(pixels, width, 28, 'BASEL CH', INK_BLACK, 2, MARGIN);
 
   // Condition (right-aligned, truncate if needed)
   const conditionText = weather.condition.length > 12 ? weather.condition.slice(0, 11) + '.' : weather.condition;
@@ -832,6 +898,84 @@ function renderDisplay(
   return pixels;
 }
 
+function renderTransitPage(
+  width: number,
+  height: number,
+  weather: WeatherData,
+  departures: TramDeparture[],
+  windowLabel: string,
+  generatedAt: Date
+): Uint8Array {
+  const pixels = new Uint8Array(width * height);
+  pixels.fill(PAPER_WHITE);
+
+  const MARGIN = 24;
+  const FOOTER_HEIGHT = 50;
+
+  // Reuse weather section from renderDisplay (inline — same layout)
+  const weatherSectionHeight = 180;
+  const tempStr = `${weather.temperature}`;
+  drawText(pixels, width, MARGIN, 30, tempStr, INK_BLACK, 10);
+  const tempWidth = getTextWidth(tempStr, 10);
+  drawText(pixels, width, MARGIN + tempWidth, 30, '°', INK_BLACK, 4);
+
+  const rightMargin = width - MARGIN;
+  const iconSize = 48;
+  const textStartX = rightMargin - 140;
+  drawWeatherIcon(pixels, width, textStartX - iconSize - 8, 20, weather.conditionCode);
+  drawRightAlignedText(pixels, width, 28, 'BASEL CH', INK_BLACK, 2, MARGIN);
+  const conditionText = weather.condition.length > 12 ? weather.condition.slice(0, 11) + '.' : weather.condition;
+  drawRightAlignedText(pixels, width, 60, conditionText, DARK_GRAY, 2, MARGIN);
+  const hiLoStr = `H:${weather.temperatureHigh} L:${weather.temperatureLow}`;
+  drawRightAlignedText(pixels, width, 92, hiLoStr, DARK_GRAY, 2, MARGIN);
+  drawHLine(pixels, width, weatherSectionHeight, MARGIN, width - MARGIN, INK_BLACK, 3);
+
+  // Date header
+  const monthNames = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+  const dateStr = `${DAY_NAMES[generatedAt.getDay()]}, ${monthNames[generatedAt.getMonth()]} ${generatedAt.getDate()}`;
+  drawCenteredText(pixels, width, weatherSectionHeight + 20, dateStr, INK_BLACK, 3);
+  const dateSectionEnd = weatherSectionHeight + 70;
+  drawHLine(pixels, width, dateSectionEnd, MARGIN, width - MARGIN, INK_BLACK, 2);
+
+  // Transit header
+  const transitHeaderY = dateSectionEnd + 14;
+  drawText(pixels, width, MARGIN, transitHeaderY, 'TRAM 8', INK_BLACK, 3);
+  drawText(pixels, width, MARGIN, transitHeaderY + 28, 'LAUPENRING \u2192 SBB BASEL', DARK_GRAY, 2);
+  drawRightAlignedText(pixels, width, transitHeaderY + 10, windowLabel, DARK_GRAY, 2, MARGIN);
+  const transitListStart = transitHeaderY + 58;
+  drawHLine(pixels, width, transitListStart, MARGIN, width - MARGIN, INK_BLACK, 2);
+
+  // Departure list
+  const maxContentY = height - FOOTER_HEIGHT;
+  const ROW_HEIGHT = 38;
+  let y = transitListStart + 10;
+
+  if (departures.length === 0) {
+    drawText(pixels, width, MARGIN, y, 'No departures found', LIGHT_GRAY, 2);
+  } else {
+    for (const dep of departures) {
+      if (y + ROW_HEIGHT > maxContentY) break;
+      const color = dep.isPast ? LIGHT_GRAY : INK_BLACK;
+      drawText(pixels, width, MARGIN, y, dep.time, color, 3);
+      if (dep.delay > 0 && !dep.isPast) {
+        const delayX = MARGIN + getTextWidth(dep.time, 3) + 10;
+        drawText(pixels, width, delayX, y + 4, `+${dep.delay}`, DARK_GRAY, 2);
+      }
+      y += ROW_HEIGHT;
+    }
+  }
+
+  // Footer
+  const footerY = height - 30;
+  drawHLine(pixels, width, footerY - 10, MARGIN, width - MARGIN, LIGHT_GRAY, 1);
+  const timeStr = generatedAt.toLocaleTimeString('en-US', {
+    hour: '2-digit', minute: '2-digit', hour12: false, timeZone: TIMEZONE,
+  });
+  drawRightAlignedText(pixels, width, footerY, `Generated ${timeStr}`, DARK_GRAY, 1, MARGIN);
+
+  return pixels;
+}
+
 // ============================================================================
 // Worker Handler
 // ============================================================================
@@ -841,17 +985,31 @@ export default {
     const width = parseInt(env.DISPLAY_WIDTH) || 480;
     const height = parseInt(env.DISPLAY_HEIGHT) || 800;
 
-    // Fetch data in parallel
-    const [weather, days] = await Promise.all([
-      fetchWeather(env),
-      fetchCalendarEvents(env),
-    ]);
-
-    // Generate display
     const generatedAt = new Date();
-    const pixels = renderDisplay(width, height, weather, days, generatedAt);
+    const [h, m] = getBaselHourMin(generatedAt);
 
-    // Create BMP
+    let pixels: Uint8Array;
+
+    if (inWindow(h, m, MORNING_WINDOW)) {
+      const [weather, departures] = await Promise.all([
+        fetchWeather(env),
+        fetchTramDepartures(MORNING_WINDOW.start, generatedAt).catch(() => [] as TramDeparture[]),
+      ]);
+      pixels = renderTransitPage(width, height, weather, departures, '08:00 – 10:30', generatedAt);
+    } else if (inWindow(h, m, AFTERNOON_WINDOW)) {
+      const [weather, departures] = await Promise.all([
+        fetchWeather(env),
+        fetchTramDepartures(AFTERNOON_WINDOW.start, generatedAt).catch(() => [] as TramDeparture[]),
+      ]);
+      pixels = renderTransitPage(width, height, weather, departures, '14:00 – 19:00', generatedAt);
+    } else {
+      const [weather, days] = await Promise.all([
+        fetchWeather(env),
+        fetchCalendarEvents(env),
+      ]);
+      pixels = renderDisplay(width, height, weather, days, generatedAt);
+    }
+
     const bmp = createBMP(width, height, pixels);
 
     return new Response(bmp, {
