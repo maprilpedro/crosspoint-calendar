@@ -3,6 +3,11 @@ main = "src/index.ts"
 compatibility_date = "2024-01-01"
 account_id = "ea76e5b24c115e61c4ca83acb28b7e4d"
 
+[[kv_namespaces]]
+binding = "WEATHER_CACHE"
+id = "REPLACE_WITH_ID_FROM_WRANGLER_KV_NAMESPACE_CREATE"
+preview_id = "REPLACE_WITH_PREVIEW_ID_FROM_WRANGLER_KV_NAMESPACE_CREATE_PREVIEW"
+
 [vars]
 DISPLAY_WIDTH = "480"
 DISPLAY_HEIGHT = "800"

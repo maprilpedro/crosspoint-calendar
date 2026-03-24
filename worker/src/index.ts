@@ -13,6 +13,7 @@ export interface Env {
   GOOGLE_CALENDAR_API_KEY?: string;
   GOOGLE_CALENDAR_ID?: string;
   VISUAL_CROSSING_API_KEY?: string;
+  WEATHER_CACHE: KVNamespace;
 }
 
 // Weather data from Open-Meteo API
@@ -162,13 +163,10 @@ async function fetchWeatherFromVisualCrossing(apiKey: string): Promise<WeatherDa
 
 async function fetchWeather(env: Env): Promise<WeatherData> {
   // Try to get from cache first
-  const cache = caches.default;
-  const cachedResponse = await cache.match(WEATHER_CACHE_KEY);
-
-  if (cachedResponse) {
-    const cached = await cachedResponse.json() as WeatherData;
+  const cached = await env.WEATHER_CACHE.get(WEATHER_CACHE_KEY);
+  if (cached) {
     console.log('Using cached weather data');
-    return cached;
+    return JSON.parse(cached) as WeatherData;
   }
 
   let weatherData: WeatherData | null = null;
@@ -195,13 +193,7 @@ async function fetchWeather(env: Env): Promise<WeatherData> {
 
   // If we got weather data, cache and return it
   if (weatherData) {
-    const cacheResponse = new Response(JSON.stringify(weatherData), {
-      headers: {
-        'Content-Type': 'application/json',
-        'Cache-Control': `public, max-age=${WEATHER_CACHE_TTL}`,
-      },
-    });
-    await cache.put(WEATHER_CACHE_KEY, cacheResponse);
+    await env.WEATHER_CACHE.put(WEATHER_CACHE_KEY, JSON.stringify(weatherData), { expirationTtl: WEATHER_CACHE_TTL });
     console.log('Cached fresh weather data');
     return weatherData;
   }
@@ -216,13 +208,7 @@ async function fetchWeather(env: Env): Promise<WeatherData> {
     conditionCode: -1,
   };
 
-  const errorCacheResponse = new Response(JSON.stringify(errorData), {
-    headers: {
-      'Content-Type': 'application/json',
-      'Cache-Control': `public, max-age=${WEATHER_ERROR_CACHE_TTL}`,
-    },
-  });
-  await cache.put(WEATHER_CACHE_KEY, errorCacheResponse);
+  await env.WEATHER_CACHE.put(WEATHER_CACHE_KEY, JSON.stringify(errorData), { expirationTtl: WEATHER_ERROR_CACHE_TTL });
   console.log('Cached error state for backoff');
 
   return errorData;
